@@ -1,0 +1,20 @@
+# Python 虛擬環境
+venv/
+.venv/
+
+# Python 編譯或暫存檔
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 作業系統雜項
+.DS_Store
+Thumbs.db
+
+# 環境變數、敏感資訊檔
+.env
+
+# IDE 設定
+.vscode/
+.idea/
