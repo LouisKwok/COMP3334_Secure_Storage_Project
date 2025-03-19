@@ -34,7 +34,7 @@ pip install -r requirements.txt
 deactivate
 ```
 
-## 5. 如何運行(windows)
+## 例子：如何運行(windows)
 ```bash
 .\venv\Scripts\activate
 python client/client.py
