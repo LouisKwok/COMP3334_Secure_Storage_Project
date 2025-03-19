@@ -14,14 +14,9 @@ python3 -m venv venv
 
 ## 2. 啟動 (Activate) 虛擬環境
 
-### Windows (PowerShell)
-```bash
-.\venv\Scripts\Activate.ps1
-```
-
 ### Windows (CMD)
 ```bash
-.\venv\Scripts\activate.bat
+.\venv\Scripts\activate
 ```
 
 ### macOS / Linux (Bash / Zsh)
@@ -39,7 +34,9 @@ pip install -r requirements.txt
 deactivate
 ```
 
-## 5. 運行 server
+## 5. 如何運行(windows)
 ```bash
+.\venv\Scripts\activate
+python client/client.py
 python -m server.server
 ```
