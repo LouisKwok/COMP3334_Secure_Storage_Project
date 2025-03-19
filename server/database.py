@@ -67,6 +67,29 @@ def verify_user(username, password):
     
     return False
 
+# 重設密碼
+def reset_password(username, new_password):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+
+    if row:
+        user_id = row[0]
+        # 產生新的 salt 和密碼哈希
+        salt = os.urandom(16).hex()
+        password_hash = hashlib.pbkdf2_hmac('sha256', new_password.encode(), salt.encode(), 100000).hex()
+        
+        cursor.execute("UPDATE users SET password_hash = ?, salt = ? WHERE id = ?", 
+                       (password_hash, salt, user_id))
+        conn.commit()
+        conn.close()
+        return True
+
+    conn.close()
+    return False
+
 # 上傳文件（加密後的文件）
 def upload_file(owner_id, filename, encrypted_data):
     conn = sqlite3.connect(DB_FILE)
