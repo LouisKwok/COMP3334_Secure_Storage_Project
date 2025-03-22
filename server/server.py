@@ -113,7 +113,6 @@ def upload():
 
 @app.route('/list_files', methods=['GET'])
 def list_files():
-    # 只列出「自己擁有」的檔案
     token = request.args.get("token")
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
@@ -131,7 +130,6 @@ def list_files():
 
 @app.route('/list_my_accessible_files', methods=['GET'])
 def list_my_accessible_files():
-    # 列出「自己擁有 + 被分享」的檔案
     token = request.args.get("token")
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
@@ -201,8 +199,8 @@ def delete_file():
 
     deleted = delete_file_db(file_id, user_id)
     if deleted:
-        print(f"[INFO] User '{username}' deleted file ID '{file_id}'.")
-        return jsonify({"message": "File deleted successfully"})
+        print(f"[INFO] User '{username}' deleted file ID '{file_id}'. Shared records also removed.")
+        return jsonify({"message": "File deleted successfully, along with any sharing records."})
     else:
         print(f"[WARN] Delete failed by user '{username}' for file ID '{file_id}'.")
         return jsonify({"error": "Delete failed. Either file not found or not owner."}), 400

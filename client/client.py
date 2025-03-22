@@ -328,7 +328,6 @@ def main():
     global token
     while True:
         if token:
-            # Logged in menu
             print("\n[Main Menu - Logged In]")
             print("1. Access Files")
             print("2. Reset Password")
@@ -347,7 +346,6 @@ def main():
             else:
                 print("[ERROR] : Invalid selection.")
         else:
-            # Not logged in menu
             print("\n[Main Menu - Not Logged In]")
             print("1. Register")
             print("2. Login")

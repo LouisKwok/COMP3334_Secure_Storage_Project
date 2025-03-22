@@ -143,16 +143,30 @@ def get_file_by_id(file_id):
     return None
 
 def delete_file_db(file_id, owner_id):
+    """
+    先檢查檔案是否屬於 owner_id，
+    若是，再把 shared_files 裡對應的紀錄刪除，
+    最後刪除 files 中的紀錄。
+    回傳 True/False 表示是否成功刪除。
+    """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute(
-        "DELETE FROM files WHERE id = ? AND owner_id = ?", 
-        (file_id, owner_id)
-    )
-    affected = cursor.rowcount
+
+    # 確認該檔案的 owner_id 是否是傳入的使用者
+    cursor.execute("SELECT id FROM files WHERE id = ? AND owner_id = ?", (file_id, owner_id))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+
+    # 先刪除 shared_files 中對應的 file_id
+    cursor.execute("DELETE FROM shared_files WHERE file_id = ?", (file_id,))
+    # 再刪除 files 裏的紀錄
+    cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+    
     conn.commit()
     conn.close()
-    return (affected > 0)
+    return True
 
 def share_file_db(file_id, shared_user_id):
     conn = sqlite3.connect(DB_FILE)
