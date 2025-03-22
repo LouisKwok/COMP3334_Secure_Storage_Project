@@ -1,6 +1,7 @@
 import sqlite3
 import hashlib
 import os
+from datetime import datetime
 
 DB_FILE = 'server/storage.db'
 
@@ -13,7 +14,8 @@ def create_tables():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            salt TEXT NOT NULL
+            salt TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0
         )
     ''')
 
@@ -37,20 +39,34 @@ def create_tables():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT NOT NULL,
+            detail TEXT,
+            timestamp TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
-def create_user(username, password):
+def create_user(username, password, is_admin=False):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     salt = os.urandom(16).hex()
     password_hash = hashlib.pbkdf2_hmac(
         'sha256', password.encode(), salt.encode(), 100000
     ).hex()
+
+    admin_val = 1 if is_admin else 0
     try:
+        # 參數化查詢，避免 SQL Injection
         cursor.execute(
-            "INSERT INTO users (username, password_hash, salt) VALUES (?, ?, ?)", 
-            (username, password_hash, salt)
+            "INSERT INTO users (username, password_hash, salt, is_admin) VALUES (?, ?, ?, ?)", 
+            (username, password_hash, salt, admin_val)
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -62,6 +78,7 @@ def create_user(username, password):
 def verify_user(username, password):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    # 參數化查詢
     cursor.execute("SELECT password_hash, salt FROM users WHERE username = ?", (username,))
     row = cursor.fetchone()
     conn.close()
@@ -93,6 +110,16 @@ def update_password(username, new_password):
     conn.commit()
     conn.close()
     return True
+
+def is_admin_user(username):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_admin FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return (row[0] == 1)
+    return False
 
 def get_user_id(username):
     conn = sqlite3.connect(DB_FILE)
@@ -143,27 +170,16 @@ def get_file_by_id(file_id):
     return None
 
 def delete_file_db(file_id, owner_id):
-    """
-    先檢查檔案是否屬於 owner_id，
-    若是，再把 shared_files 裡對應的紀錄刪除，
-    最後刪除 files 中的紀錄。
-    回傳 True/False 表示是否成功刪除。
-    """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-
-    # 確認該檔案的 owner_id 是否是傳入的使用者
     cursor.execute("SELECT id FROM files WHERE id = ? AND owner_id = ?", (file_id, owner_id))
     row = cursor.fetchone()
     if not row:
         conn.close()
         return False
 
-    # 先刪除 shared_files 中對應的 file_id
     cursor.execute("DELETE FROM shared_files WHERE file_id = ?", (file_id,))
-    # 再刪除 files 裏的紀錄
     cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
-    
     conn.commit()
     conn.close()
     return True
@@ -178,7 +194,7 @@ def share_file_db(file_id, shared_user_id):
     row = cursor.fetchone()
     if row:
         conn.close()
-        return False  # already shared
+        return False
 
     cursor.execute("""
         INSERT INTO shared_files (file_id, shared_user_id) 
@@ -203,7 +219,6 @@ def unshare_file_db(file_id, shared_user_id):
 def has_access(user_id, file_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # check if user is the owner
     cursor.execute("SELECT owner_id FROM files WHERE id = ?", (file_id,))
     row = cursor.fetchone()
     if not row:
@@ -214,7 +229,6 @@ def has_access(user_id, file_id):
         conn.close()
         return True
 
-    # otherwise check shared_files
     cursor.execute("""
         SELECT id FROM shared_files 
         WHERE file_id = ? AND shared_user_id = ?
@@ -261,6 +275,43 @@ def get_accessible_files(user_id):
             "filename": row[1],
             "owner_name": row[2],
             "relation": row[3]
+        })
+    return results
+
+# ========== Audit Log Functions ==========
+
+def log_event(user_id, action, detail=""):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    timestamp = datetime.utcnow().isoformat()
+    cursor.execute('''
+        INSERT INTO audit_logs (user_id, action, detail, timestamp)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, action, detail, timestamp))
+    conn.commit()
+    conn.close()
+
+def read_all_logs():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT audit_logs.id, audit_logs.user_id, users.username,
+               audit_logs.action, audit_logs.detail, audit_logs.timestamp
+        FROM audit_logs
+        LEFT JOIN users ON users.id = audit_logs.user_id
+        ORDER BY audit_logs.id ASC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    results = []
+    for r in rows:
+        results.append({
+            "log_id": r[0],
+            "user_id": r[1],
+            "username": r[2] if r[2] else "Unknown",
+            "action": r[3],
+            "detail": r[4],
+            "timestamp": r[5]
         })
     return results
 
