@@ -52,9 +52,11 @@ def login():
     global token, is_admin, current_username
     username = input("Enter username: ")
     password = input("Enter password: ")
+    otp_code = input("Enter OTP code: ")
     res = requests.post(f"{BASE_URL}/login", json={
         "username": username,
-        "password": password
+        "password": password,
+        "otp_code": otp_code
     })
 
     data = res.json()

@@ -5,7 +5,7 @@ from server.database import (
     create_tables, create_user, verify_user, update_password, is_admin_user,
     get_user_id, get_username_by_id, upload_file_db, get_user_files, get_file_by_id,
     delete_file_db, share_file_db, unshare_file_db, has_access, get_shared_users,
-    get_accessible_files, log_event, read_all_logs
+    get_accessible_files, log_event, read_all_logs, get_otp_secret
 )
 
 app = Flask(__name__)
@@ -19,14 +19,17 @@ def register():
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
-    if create_user(username, password, is_admin=False):
+    success, otp_secret = create_user(username, password, is_admin=False)
+    if success:
         user_id = get_user_id(username)
         log_event(user_id, "REGISTER", detail=f"username={username}")
         print(f"[INFO] A new user '{username}' has been registered.")
+        print(f"[INFO] New user {username} OTP secret = {otp_secret}")
         return jsonify({"message": f"User '{username}' registered successfully!"})
     else:
         print(f"[WARN] Registration failed. User '{username}' already exists.")
         return jsonify({"error": "Username already exists"}), 400
+
 
 @app.route('/admin_register', methods=['POST'])
 def admin_register():
@@ -36,10 +39,12 @@ def admin_register():
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
-    if create_user(username, password, is_admin=True):
+    success, otp_secret = create_user(username, password, is_admin=True)
+    if success:
         user_id = get_user_id(username)
         log_event(user_id, "REGISTER_ADMIN", detail=f"username={username}")
         print(f"[INFO] A new admin '{username}' has been created.")
+        print(f"[INFO] New user {username} OTP secret = {otp_secret}")
         return jsonify({"message": f"Admin '{username}' registered successfully!"})
     else:
         return jsonify({"error": "Admin creation failed. Username might exist."}), 400
@@ -49,14 +54,31 @@ def login():
     data = request.json
     username = data.get("username")
     password = data.get("password")
+    otp_code = data.get("otp_code")
 
     if verify_user(username, password):
+        # 檢查 OTP
+        secret = get_otp_secret(username)
+        if secret is None:
+            return jsonify({"error": "User has no OTP secret"}), 400
+
+        import pyotp
+        totp = pyotp.TOTP(secret)
+        if not otp_code:
+            return jsonify({"error": "OTP code is required"}), 400
+
+        # 驗證 OTP 是否正確
+        if not totp.verify(otp_code):
+            print(f"[WARN] OTP verification failed for user '{username}'.")
+            return jsonify({"error": "Invalid OTP code"}), 401
+
+        # OTP ok 才算登入成功
         token = os.urandom(16).hex()
         logged_in_users[token] = username
+
         user_id = get_user_id(username)
         log_event(user_id, "LOGIN", detail=f"token={token}")
-        print(f"[INFO] User '{username}' logged in. Token: {token}")
-        # 回傳 is_admin，以便 client 決定是否顯示 "View Logs"
+        print(f"[INFO] User '{username}' logged in with OTP. Token: {token}")
         is_admin = is_admin_user(username)
         return jsonify({
             "message": "Login successful",

@@ -1,6 +1,7 @@
 import sqlite3
 import hashlib
 import os
+import pyotp
 from datetime import datetime
 
 DB_FILE = 'server/storage.db'
@@ -15,7 +16,8 @@ def create_tables():
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
-            is_admin INTEGER NOT NULL DEFAULT 0
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            otp_secret TEXT
         )
     ''')
 
@@ -62,18 +64,18 @@ def create_user(username, password, is_admin=False):
     ).hex()
 
     admin_val = 1 if is_admin else 0
+    otp_secret = pyotp.random_base32()
     try:
-        # 參數化查詢，避免 SQL Injection
         cursor.execute(
-            "INSERT INTO users (username, password_hash, salt, is_admin) VALUES (?, ?, ?, ?)", 
-            (username, password_hash, salt, admin_val)
+            "INSERT INTO users (username, password_hash, salt, is_admin, otp_secret) VALUES (?, ?, ?, ?, ?)", 
+            (username, password_hash, salt, admin_val, otp_secret)
         )
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
-        return False
+        return (False, None)
     conn.close()
-    return True
+    return (True, otp_secret)
 
 def verify_user(username, password):
     conn = sqlite3.connect(DB_FILE)
@@ -278,8 +280,6 @@ def get_accessible_files(user_id):
         })
     return results
 
-# ========== Audit Log Functions ==========
-
 def log_event(user_id, action, detail=""):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -314,6 +314,16 @@ def read_all_logs():
             "timestamp": r[5]
         })
     return results
+
+def get_otp_secret(username):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT otp_secret FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return row[0]  
+    return None
 
 if __name__ == '__main__':
     create_tables()
