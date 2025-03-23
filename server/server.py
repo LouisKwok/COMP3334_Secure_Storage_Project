@@ -1,11 +1,13 @@
 from flask import Flask, request, jsonify
 import os
+import base64
 import re
+
 from server.database import (
     create_tables, create_user, verify_user, update_password, is_admin_user,
     get_user_id, get_username_by_id, upload_file_db, get_user_files, get_file_by_id,
     delete_file_db, share_file_db, unshare_file_db, has_access, get_shared_users,
-    get_accessible_files, log_event, read_all_logs, get_otp_secret
+    get_accessible_files, log_event, read_all_logs, get_otp_secret, upsert_chunk, get_chunks, remove_chunk, create_file_in_db
 )
 
 app = Flask(__name__)
@@ -336,17 +338,163 @@ def read_logs():
     return jsonify({"logs": logs})
 
 def validate_filename(filename):
-    # 1. 檔名中不允許出現 "../" 或 "..\" 等企圖越級存取的路徑
     if "../" in filename or "..\\" in filename:
         return False
-    # 2. 可以再用正規表達式限制只允許 [a-zA-Z0-9._-] 等字元
     pattern = r'^[a-zA-Z0-9._-]+$'
     if not re.match(pattern, filename):
         return False
-    # 3. 檔名不能為空
     if not filename.strip():
         return False
     return True
+
+@app.route('/upload_chunk', methods=['POST'])
+def upload_chunk():
+    """
+    單一路由: 若 file_id=-1/None 且 chunk_index=0 => 自動建立檔案並回傳 file_id。
+    若 file_id>0 => 上傳更新既有檔案的 chunk。
+    """
+    data = request.json
+    token = data.get("token")
+    raw_file_id = data.get("file_id", None)
+    chunk_index = data.get("chunk_index")
+    chunk_data_b64 = data.get("chunk_data")
+    filename = data.get("filename")  # 只有第一次 chunk 需要
+
+    if token not in logged_in_users:
+        return jsonify({"error": "Not logged in"}), 401
+
+    if chunk_index is None or chunk_data_b64 is None:
+        return jsonify({"error": "chunk_index, chunk_data are required"}), 400
+
+    # chunk_index 檢查
+    try:
+        chunk_index = int(chunk_index)
+        if chunk_index < 0:
+            return jsonify({"error": "chunk_index cannot be negative"}), 400
+    except ValueError:
+        return jsonify({"error": "chunk_index must be integer"}), 400
+
+    # base64 decode
+    try:
+        encrypted_data = base64.b64decode(chunk_data_b64)
+    except Exception:
+        return jsonify({"error": "Invalid base64 chunk_data"}), 400
+
+    max_chunk_size = 10 * 1024 * 1024
+    if len(encrypted_data) > max_chunk_size:
+        return jsonify({"error": "Chunk too large"}), 413
+
+    current_user = logged_in_users[token]
+    user_id = get_user_id(current_user)
+    if not user_id:
+        return jsonify({"error": "User record not found"}), 404
+
+    # file_id 檢查
+    if raw_file_id is None or raw_file_id in [-1, 0]:
+        # 表示要新建檔案 => 必須 chunk_index=0, 且要有filename
+        if chunk_index != 0:
+            return jsonify({"error": "To create a new file, chunk_index must be 0"}), 400
+        if not filename:
+            return jsonify({"error": "filename is required for the first chunk of a new file"}), 400
+
+        # create file row
+        new_file_id = create_file_in_db(user_id, filename)
+        real_file_id = new_file_id
+        print(f"[INFO] Created new file with id={real_file_id} for user_id={user_id}")
+    else:
+        # 使用現有檔案
+        try:
+            real_file_id = int(raw_file_id)
+        except ValueError:
+            return jsonify({"error": "file_id must be integer"}), 400
+
+        frow = get_file_by_id(real_file_id)
+        if not frow:
+            return jsonify({"error": f"File with id={real_file_id} not found"}), 404
+        if not has_access(user_id, real_file_id):
+            return jsonify({"error": "Access denied"}), 403
+
+    # upsert chunk
+    upsert_chunk(real_file_id, chunk_index, encrypted_data)
+
+    # log
+    log_event(user_id, "UPLOAD_CHUNK", detail=f"file_id={real_file_id}, chunk_index={chunk_index}")
+
+    return jsonify({
+        "message": f"Chunk #{chunk_index} for file_id={real_file_id} uploaded",
+        "file_id": real_file_id
+    })
+
+@app.route('/download_chunks', methods=['GET'])
+def download_chunks():
+    token = request.args.get("token")
+    file_id = request.args.get("file_id")
+
+    if token not in logged_in_users:
+        return jsonify({"error": "Not logged in"}), 401
+    if not file_id:
+        return jsonify({"error": "file_id is required"}), 400
+
+    try:
+        file_id = int(file_id)
+    except ValueError:
+        return jsonify({"error": "file_id must be integer"}), 400
+
+    frow = get_file_by_id(file_id)
+    if not frow:
+        return jsonify({"error": "File not found"}), 404
+
+    current_user = logged_in_users[token]
+    user_id = get_user_id(current_user)
+    if not has_access(user_id, file_id):
+        return jsonify({"error": "Access denied"}), 403
+
+    chunk_rows = get_chunks(file_id)
+    result = []
+    for (cidx, enc) in chunk_rows:
+        b64_enc = base64.b64encode(enc).decode()
+        result.append({"chunk_index": cidx, "chunk_data": b64_enc})
+
+    log_event(user_id, "DOWNLOAD_CHUNKS", detail=f"file_id={file_id}")
+
+    return jsonify({"chunks": result})
+
+@app.route('/delete_chunk', methods=['DELETE'])
+def delete_chunk_endpoint():
+    data = request.json
+    token = data.get("token")
+    file_id = data.get("file_id")
+    chunk_index = data.get("chunk_index")
+
+    if token not in logged_in_users:
+        return jsonify({"error": "Not logged in"}), 401
+
+    if file_id is None or chunk_index is None:
+        return jsonify({"error": "file_id and chunk_index are required"}), 400
+
+    # 檢查型別
+    try:
+        file_id = int(file_id)
+        chunk_index = int(chunk_index)
+    except ValueError:
+        return jsonify({"error": "file_id and chunk_index must be integers"}), 400
+
+    file_record = get_file_by_id(file_id)
+    if not file_record:
+        return jsonify({"error": "File not found"}), 404
+
+    user = logged_in_users[token]
+    user_id = get_user_id(user)
+    if not has_access(user_id, file_id):
+        return jsonify({"error": "Access denied"}), 403
+
+    # 執行資料庫刪除
+    rowcount = remove_chunk(file_id, chunk_index)
+    if rowcount > 0:
+        log_event(user_id, "DELETE_CHUNK", detail=f"file_id={file_id}, chunk_index={chunk_index}")
+        return jsonify({"message": f"Chunk #{chunk_index} for file_id={file_id} removed"})
+    else:
+        return jsonify({"error": "No such chunk or already deleted"}), 404
 
 if __name__ == '__main__':
     create_tables()

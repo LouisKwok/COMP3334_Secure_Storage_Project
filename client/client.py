@@ -300,23 +300,225 @@ def view_logs():
     else:
         print_response(res)
 
+def upload_file_in_chunks_single_route():
+    """
+    單一路由上傳: 第一次 chunk => file_id=-1 (或 None) => server自動建立檔案,
+    後續 chunk => server回傳 real_file_id => 之後 chunk 全帶此 id => upsert chunk
+    """
+    if not token:
+        print("[ERROR] You are not logged in.")
+        return
+
+    file_path = input("Enter the file path to upload: ")
+    if not os.path.exists(file_path):
+        print("[ERROR] : File not found.")
+        return
+
+    # 使用者若想更新已存在檔案 => 輸入 file_id (e.g. 12)
+    # 若想新建 => file_id=-1
+    raw_file_id = input("Enter file_id (or -1 for new): ")
+    try:
+        raw_file_id = int(raw_file_id)
+    except ValueError:
+        print("[ERROR] : file_id must be an integer or -1")
+        return
+
+    filename = None
+    if raw_file_id < 0:
+        # user wants to create a new file => ask for filename
+        filename = input("Enter filename for the new file: ")
+
+    chunk_size = 8192
+    key = load_key()
+    cipher = Fernet(key)
+
+    chunk_idx = 0
+    with open(file_path, "rb") as f:
+        while True:
+            chunk_data = f.read(chunk_size)
+            if not chunk_data:
+                break
+            enc_data = cipher.encrypt(chunk_data)
+            b64_data = base64.b64encode(enc_data).decode()
+
+            # 第一次chunk => server若 file_id=-1, chunk_index=0 => create new
+            post_data = {
+                "token": token,
+                "file_id": raw_file_id,
+                "chunk_index": chunk_idx,
+                "chunk_data": b64_data
+            }
+            if chunk_idx == 0 and raw_file_id < 0:
+                post_data["filename"] = filename
+
+            r = requests.post(f"{BASE_URL}/upload_chunk", json=post_data)
+            if r.status_code != 200:
+                print_response(r)
+                return
+            else:
+                j = r.json()
+                print("[MESSAGE]", j.get("message", ""))
+
+                # 若是第一次 chunk 而 file_id=-1 => server回傳 file_id => 後面更新 raw_file_id
+                if chunk_idx == 0 and raw_file_id < 0:
+                    new_fid = j.get("file_id")
+                    if new_fid is not None:
+                        raw_file_id = new_fid
+                        print(f"[INFO] Server assigned file_id={raw_file_id} for subsequent chunks.")
+
+            chunk_idx += 1
+
+    print("[MESSAGE] All chunks uploaded via single-route approach.")
+
+def download_file_in_chunks():
+    if not token:
+        print("[ERROR] You are not logged in.")
+        return
+    file_id = input("Enter file_id: ")
+    out_path = input("Enter local path to save merged file: ")
+
+    res = requests.get(f"{BASE_URL}/download_chunks", params={
+        "token": token,
+        "file_id": file_id
+    })
+    if res.status_code != 200:
+        print_response(res)
+        return
+
+    data = res.json()
+    chunks = data.get("chunks", [])
+
+    key = load_key()
+    cipher = Fernet(key)
+
+    sorted_chunks = sorted(chunks, key=lambda x: x["chunk_index"])
+    with open(out_path,"wb") as out:
+        for c in sorted_chunks:
+            enc = base64.b64decode(c["chunk_data"])
+            dec = cipher.decrypt(enc)
+            out.write(dec)
+
+    print("[MESSAGE] Downloaded and merged all chunks into", out_path)
+
+def auto_update_file_in_chunks():
+    global token
+    if not token:
+        print("[ERROR] You are not logged in.")
+        return
+
+    file_id = input("Enter file_id to update: ")
+    new_file_path = input("Enter local path of the NEW file: ")
+    if not os.path.exists(new_file_path):
+        print("[ERROR] New file not found.")
+        return
+
+    # 1) 下載舊檔案 chunks
+    res = requests.get(f"{BASE_URL}/download_chunks", params={
+        "token": token,
+        "file_id": file_id
+    })
+    if res.status_code != 200:
+        print_response(res)
+        return
+
+    data = res.json()
+    chunk_list = data.get("chunks", [])
+
+    key = load_key()
+    cipher = Fernet(key)
+
+    # 組合舊檔案 plaintext
+    sorted_chunks = sorted(chunk_list, key=lambda c: c["chunk_index"])
+    old_plain_bytes = b""
+    for c in sorted_chunks:
+        enc_bytes = base64.b64decode(c["chunk_data"])
+        dec_bytes = cipher.decrypt(enc_bytes)
+        old_plain_bytes += dec_bytes
+
+    # 2) 讀取新檔案
+    with open(new_file_path, "rb") as nf:
+        new_plain_bytes = nf.read()
+
+    chunk_size = 8192
+    old_length = len(old_plain_bytes)
+    new_length = len(new_plain_bytes)
+    max_length = max(old_length, new_length)
+
+    offset = 0
+    chunk_index = 0
+
+    while offset < max_length:
+        old_chunk = old_plain_bytes[offset:offset+chunk_size]
+        new_chunk = new_plain_bytes[offset:offset+chunk_size]
+
+        if old_chunk != new_chunk:
+            # 上傳新的 chunk
+            enc = cipher.encrypt(new_chunk)
+            b64_data = base64.b64encode(enc).decode()
+            rr = requests.post(f"{BASE_URL}/upload_chunk", json={
+                "token": token,
+                "file_id": file_id,
+                "chunk_index": chunk_index,
+                "chunk_data": b64_data
+            })
+            if rr.status_code != 200:
+                print_response(rr)
+                return
+            else:
+                print(f"[MESSAGE] Updated chunk #{chunk_index}")
+
+        chunk_index += 1
+        offset += chunk_size
+
+    # ====== 新增刪除多餘 chunk ======
+    # 如果舊檔案比較長 => old_total_chunks = ceil(old_length / chunk_size)
+    #                     new_total_chunks = ceil(new_length / chunk_size)
+    # 例如 old=35000 bytes => 5 chunks, new=25000 => 4 chunks => 刪 chunk_index=4
+    import math
+    old_total_chunks = math.ceil(old_length / chunk_size)
+    new_total_chunks = math.ceil(new_length / chunk_size)
+
+    if old_total_chunks > new_total_chunks:
+        print(f"[INFO] old_total_chunks={old_total_chunks} > new_total_chunks={new_total_chunks}")
+        # 刪除 new_total_chunks ~ old_total_chunks-1
+        for cindex in range(new_total_chunks, old_total_chunks):
+            delr = requests.delete(f"{BASE_URL}/delete_chunk", json={
+                "token": token,
+                "file_id": file_id,
+                "chunk_index": cindex
+            })
+            if delr.status_code == 200:
+                print(f"[MESSAGE] Chunk #{cindex} removed.")
+            else:
+                print_response(delr)
+                return
+    else:
+        print(f"[INFO] No extra chunk to remove. (old={old_total_chunks}, new={new_total_chunks})")
+
+    print("[MESSAGE] auto_update_file_in_chunks completed. Only changed chunks re-uploaded. Extra chunks removed if needed.")
+
 def file_menu():
     while True:
         print("\n[File Menu]")
-        print("1. Upload File")
-        print("2. Download File")
+        print("1. Upload File (Single)")
+        print("2. Download File (Single)")
         print("3. Share File")
         print("4. Unshare File")
         print("5. Delete File")
         print("6. List My Owned Files")
         print("7. List All Accessible Files")
         print("8. Show File Info")
-        print("9. Back to Main Menu")
+        print("9. Upload File in Chunks (Extended)")
+        print("10. Download File in Chunks (Extended)")
+        print("11. Auto Update File in Chunks (Extended)")
+        print("12. Back to Main Menu")
+
         choice = input("Choose an option: ")
+
         if choice == "1":
-            upload_file()
+            upload_file()            # 你原先的單檔上傳
         elif choice == "2":
-            download_file()
+            download_file()          # 你原先的單檔下載
         elif choice == "3":
             share_file()
         elif choice == "4":
@@ -341,8 +543,21 @@ def file_menu():
                     print(f"  ID: {f['id']} | NAME: {f['filename']} | OWNER: {f['owner_name']} | RELATION: {f['relation']}")
         elif choice == "8":
             show_file_info()
+
+        # 下面是新的分塊式操作 (Extended)
         elif choice == "9":
+            # 分塊上傳
+            upload_file_in_chunks_single_route()
+        elif choice == "10":
+            # 分塊下載
+            download_file_in_chunks()
+        elif choice == "11":
+            # 只更新單一區塊
+            auto_update_file_in_chunks()
+
+        elif choice == "12":
             break
+
         else:
             print("[ERROR] : Invalid selection.")
 

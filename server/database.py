@@ -26,7 +26,7 @@ def create_tables():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner_id INTEGER NOT NULL,
             filename TEXT NOT NULL,
-            encrypted_data BLOB NOT NULL,
+            encrypted_data BLOB,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
     ''')
@@ -49,6 +49,17 @@ def create_tables():
             detail TEXT,
             timestamp TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            encrypted_data BLOB NOT NULL,
+            FOREIGN KEY (file_id) REFERENCES files(id),
+            UNIQUE (file_id, chunk_index)
         )
     ''')
 
@@ -324,6 +335,46 @@ def get_otp_secret(username):
     if row:
         return row[0]  
     return None
+
+def upsert_chunk(file_id, chunk_index, encrypted_data):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO chunks (file_id, chunk_index, encrypted_data)
+        VALUES (?, ?, ?)
+        ON CONFLICT(file_id, chunk_index) DO UPDATE SET encrypted_data=excluded.encrypted_data
+    """, (file_id, chunk_index, encrypted_data))
+    conn.commit()
+    conn.close()
+
+def get_chunks(file_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT chunk_index, encrypted_data FROM chunks WHERE file_id = ? ORDER BY chunk_index ASC", (file_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def remove_chunk(file_id, chunk_index):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM chunks
+        WHERE file_id = ? AND chunk_index = ?
+    """, (file_id, chunk_index))
+    rowcount = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return rowcount
+
+def create_file_in_db(owner_id, filename):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO files (owner_id, filename) VALUES (?, ?)", (owner_id, filename))
+    new_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return new_id
 
 if __name__ == '__main__':
     create_tables()
