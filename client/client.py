@@ -508,9 +508,9 @@ def file_menu():
         print("6. List My Owned Files")
         print("7. List All Accessible Files")
         print("8. Show File Info")
-        print("9. Upload File in Chunks (Extended)")
+        print("9. Upload File (Single-Route Chunks) (Extended)")
         print("10. Download File in Chunks (Extended)")
-        print("11. Auto Update File in Chunks (Extended)")
+        print("11. Auto Update Partial File (diff-based) (Extended)")
         print("12. Back to Main Menu")
 
         choice = input("Choose an option: ")
