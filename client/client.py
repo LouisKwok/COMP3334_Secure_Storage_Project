@@ -123,7 +123,14 @@ def list_accessible_files():
     res = requests.get(f"{BASE_URL}/list_my_accessible_files", params={"token": token})
     if res.status_code == 200:
         data = res.json()
-        return data.get("files", [])
+        files = data.get("files", [])
+        if files:
+            print("\n[INFO] You can access these files:")
+            for f in files:
+                print(f"  file_id={f['id']} | filename={f['filename']} | owner={f['owner_name']} | relation={f['relation']}")
+        else:
+            print("[INFO] No accessible files found.")
+        return files
     else:
         print_response(res)
         return []
@@ -301,10 +308,6 @@ def view_logs():
         print_response(res)
 
 def upload_file_in_chunks_single_route():
-    """
-    單一路由上傳: 第一次 chunk => file_id=-1 (或 None) => server自動建立檔案,
-    後續 chunk => server回傳 real_file_id => 之後 chunk 全帶此 id => upsert chunk
-    """
     if not token:
         print("[ERROR] You are not logged in.")
         return
@@ -313,9 +316,12 @@ def upload_file_in_chunks_single_route():
     if not os.path.exists(file_path):
         print("[ERROR] : File not found.")
         return
+    
+    confirm = input(f"Are you sure to upload '{file_path}' in chunk mode? (y/n): ").lower()
+    if confirm != 'y':
+        print("[MESSAGE] : Upload canceled.")
+        return
 
-    # 使用者若想更新已存在檔案 => 輸入 file_id (e.g. 12)
-    # 若想新建 => file_id=-1
     raw_file_id = input("Enter file_id (or -1 for new): ")
     try:
         raw_file_id = int(raw_file_id)
@@ -325,7 +331,6 @@ def upload_file_in_chunks_single_route():
 
     filename = None
     if raw_file_id < 0:
-        # user wants to create a new file => ask for filename
         filename = input("Enter filename for the new file: ")
 
     chunk_size = 8192
@@ -374,8 +379,28 @@ def download_file_in_chunks():
     if not token:
         print("[ERROR] You are not logged in.")
         return
-    file_id = input("Enter file_id: ")
-    out_path = input("Enter local path to save merged file: ")
+    
+    all_files = list_accessible_files()
+    if not all_files:
+        print("[MESSAGE] : No files to download.")
+        return
+    
+    file_id = input("Enter the file_id to download: ")
+
+    default_name = "output.txt"
+    for f in all_files:
+        if str(f["id"]) == file_id:
+            default_name = f["filename"]
+            break
+
+    out_path = input(f"Enter local path to save (default: {default_name}): ").strip()
+    if not out_path:
+        out_path = default_name
+
+    confirm = input(f"Are you sure to download file_id={file_id} => {out_path}? (y/n) : ").lower()
+    if confirm != 'y':
+        print("[MESSAGE] : Download canceled.")
+        return
 
     res = requests.get(f"{BASE_URL}/download_chunks", params={
         "token": token,
@@ -405,11 +430,21 @@ def auto_update_file_in_chunks():
     if not token:
         print("[ERROR] You are not logged in.")
         return
+    
+    all_files = list_accessible_files()
+    if not all_files:
+        print("[MESSAGE] : You have no accessible files to update.")
+        return
 
     file_id = input("Enter file_id to update: ")
     new_file_path = input("Enter local path of the NEW file: ")
     if not os.path.exists(new_file_path):
         print("[ERROR] New file not found.")
+        return
+    
+    confirm = input(f"Are you sure to update file_id={file_id} with new file '{new_file_path}'? (y/n): ").lower()
+    if confirm != 'y':
+        print("[MESSAGE] : Update canceled.")
         return
 
     # 1) 下載舊檔案 chunks

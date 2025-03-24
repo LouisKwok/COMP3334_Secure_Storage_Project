@@ -18,8 +18,12 @@ def register():
     data = request.json
     username = data.get("username")
     password = data.get("password")
+    
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
+    
+    if not validate_username(username):
+        return jsonify({"error": "Invalid username format"}), 400
 
     success, otp_secret = create_user(username, password, is_admin=False)
     if success:
@@ -156,6 +160,10 @@ def upload():
     log_event(user_id, "UPLOAD", detail=f"filename={filename}")
     print(f"[INFO] User '{username}' uploaded file '{filename}'.")
     return jsonify({"message": f"File '{filename}' uploaded successfully"})
+
+def validate_username(username):
+    pattern = r'^[a-zA-Z0-9_-]{3,20}$'
+    return bool(re.match(pattern, username))
 
 @app.route('/list_files', methods=['GET'])
 def list_files():
