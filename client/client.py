@@ -1,47 +1,71 @@
 import requests
+import math
 import os
 import base64
 from cryptography.fernet import Fernet
 
+# The server's base URL (replace if running on a different host/port).
 BASE_URL = "http://127.0.0.1:5000"
-token = None
-is_admin = False  # 紀錄當前使用者是否admin
-current_username = None
+
+# Global variables to store session info and user details.
+token = None            # Holds the current user's session token
+is_admin = False        # Indicates if the current user is an admin
+current_username = None # The username currently logged in
 
 def print_response(res):
+    """
+    Safely parse a server response as JSON.
+    Then read 'message' or 'error' fields (if present) and display them.
+    """
     data = {}
     try:
-        data = res.json()
+        data = res.json()  # Attempt to parse JSON
     except:
+        # If parsing fails, indicate an invalid server response
         print("[ERROR] : Invalid response from server.")
         return
 
     msg = data.get("message")
     err = data.get("error")
+
     if msg:
         print(f"[MESSAGE] : {msg}")
     elif err:
         print(f"[ERROR] : {err}")
     else:
+        # If server didn't provide specific fields, print a generic info.
         print("[INFO] : No relevant message from server.")
 
 def init_key():
+    """
+    Initialize the encryption key for client-side encryption.
+    If 'secret.key' doesn't exist, generate a new Fernet key and save it locally.
+    """
     if not os.path.exists("secret.key"):
         new_key = Fernet.generate_key()
         with open("secret.key", "wb") as f:
             f.write(new_key)
 
 def load_key():
+    """
+    Load the previously generated Fernet key from 'secret.key'.
+    This key is used for file encryption/decryption on the client side.
+    """
     with open("secret.key", "rb") as f:
         return f.read()
 
 def register(is_admin=False):
+    """
+    Register a new user (normal or admin).
+    If is_admin=True, call '/admin_register'; otherwise '/register'.
+    """
     username = input("Enter username: ")
     password = input("Enter password: ")
     if is_admin:
         endpoint = "/admin_register"
     else:
         endpoint = "/register"
+
     res = requests.post(f"{BASE_URL}{endpoint}", json={
         "username": username,
         "password": password
@@ -49,6 +73,10 @@ def register(is_admin=False):
     print_response(res)
 
 def login():
+    """
+    Log in by sending username, password, and an OTP code.
+    On success, store the returned token, is_admin flag, and current_username globally.
+    """
     global token, is_admin, current_username
     username = input("Enter username: ")
     password = input("Enter password: ")
@@ -59,44 +87,46 @@ def login():
         "otp_code": otp_code
     })
 
+    # Parse the JSON response
     data = res.json()
     if 'token' in data:
         token = data['token']
         current_username = username
         is_admin = data.get("is_admin", False)
+
     print_response(res)
 
-def check_admin(username):
-    # 以一個新的 API 來檢查 -> 省略 => 這裡直接簡單：server side code
-    # 或將is_admin一起回傳
-    # 我們示範一個quick hack => call /login + read server?
-    # 這裡簡化： 由server回傳 => 你可以改server login多傳 is_admin
-    # 目前只示範: 
-    res = requests.get(f"{BASE_URL}/admin_check", params={"username": username})
-    if res.status_code == 200:
-        data = res.json()
-        return data.get("is_admin", False)
-    return False
-
 def logout():
+    """
+    Log out from the server by invalidating the current token.
+    """
     global token, is_admin, current_username
     if not token:
         print("[ERROR] : You are not logged in.")
         return
+
     res = requests.post(f"{BASE_URL}/logout", json={"token": token})
     if res.status_code == 200:
+        # Clear local session info
         token = None
         is_admin = False
         current_username = None
+
     print_response(res)
 
 def reset_password():
+    """
+    Reset the current user's password.
+    This requires providing the old password, then the new one.
+    """
     global token
     if not token:
         print("[ERROR] : You are not logged in.")
         return
+
     old_password = input("Enter your old password: ")
     new_password = input("Enter your new password: ")
+
     res = requests.post(f"{BASE_URL}/reset_password", json={
         "token": token,
         "old_password": old_password,
@@ -105,9 +135,14 @@ def reset_password():
     print_response(res)
 
 def list_owned_files():
+    """
+    Fetch a list of files owned by the current user (simple listing).
+    Returns an empty list on error or if none found.
+    """
     if not token:
         print("[ERROR] : You are not logged in.")
         return []
+
     res = requests.get(f"{BASE_URL}/list_files", params={"token": token})
     if res.status_code == 200:
         data = res.json()
@@ -117,9 +152,14 @@ def list_owned_files():
         return []
 
 def list_accessible_files():
+    """
+    Fetch files that the current user can access (owned or shared).
+    This includes details like owner and relation.
+    """
     if not token:
         print("[ERROR] : You are not logged in.")
         return []
+
     res = requests.get(f"{BASE_URL}/list_my_accessible_files", params={"token": token})
     if res.status_code == 200:
         data = res.json()
@@ -136,21 +176,32 @@ def list_accessible_files():
         return []
 
 def upload_file():
+    """
+    Upload a file in one piece (non-chunk).
+    This is the simpler approach where the entire file is encrypted at once.
+    """
     file_path = input("Enter the file path to upload: ")
     if not os.path.exists(file_path):
         print("[ERROR] : File not found.")
         return
+
     confirm = input(f"Are you sure to upload '{file_path}'? (y/n): ").lower()
     if confirm != 'y':
         print("[MESSAGE] : Upload canceled.")
         return
+
     key = load_key()
     cipher = Fernet(key)
+
+    # Read file data then encrypt
     with open(file_path, "rb") as f:
         file_data = f.read()
     encrypted_data = cipher.encrypt(file_data)
     encoded_data = base64.b64encode(encrypted_data).decode()
+
+    # Use the file's local name as 'filename'
     filename = os.path.basename(file_path)
+
     res = requests.post(f"{BASE_URL}/upload", json={
         "token": token,
         "filename": filename,
@@ -159,58 +210,77 @@ def upload_file():
     print_response(res)
 
 def download_file():
+    """
+    Download an entire file (non-chunk) after listing accessible files.
+    The user selects a file_id, confirms, then the file is retrieved and decrypted.
+    """
     files = list_accessible_files()
     if not files:
         print("[MESSAGE] : You have no accessible files.")
         return
+
     print("\n[Your Accessible Files]")
     for f in files:
         print(f"  ID: {f['id']} | NAME: {f['filename']} | OWNER: {f['owner_name']} | RELATION: {f['relation']}")
+
     file_id = input("Enter the file ID to download: ")
     confirm = input(f"Are you sure to download file ID '{file_id}'? (y/n): ").lower()
     if confirm != 'y':
         print("[MESSAGE] : Download canceled.")
         return
+
     params = {"token": token, "file_id": file_id}
     res = requests.get(f"{BASE_URL}/download", params=params)
     if res.status_code != 200:
         print_response(res)
         return
+
     data = res.json()
     encrypted_b64 = data.get("file_data")
     fname = data.get("filename")
     if not encrypted_b64 or not fname:
         print("[ERROR] : Missing file data or filename.")
         return
+
     key = load_key()
     cipher = Fernet(key)
     encrypted_bytes = base64.b64decode(encrypted_b64)
+
     try:
         decrypted_data = cipher.decrypt(encrypted_bytes)
     except Exception:
         print("[ERROR] : Decryption failed.")
         return
+
     save_path = input(f"Enter the local path to save the file (default: {fname}): ")
     if not save_path.strip():
         save_path = fname
+
     with open(save_path, "wb") as f:
         f.write(decrypted_data)
+
     print(f"[MESSAGE] : File saved to {save_path}")
 
 def share_file():
+    """
+    Share an owned file with another user. The target username can then access that file.
+    """
     owned = list_owned_files()
     if not owned:
         print("[MESSAGE] : You have no owned files.")
         return
+
     print("\n[Your Owned Files]")
     for f in owned:
         print(f"  ID: {f['id']} | NAME: {f['filename']}")
+
     file_id = input("Enter the file ID to share: ")
     target_username = input("Enter target username to share with: ")
     confirm = input(f"Are you sure to share file ID '{file_id}' with '{target_username}'? (y/n): ").lower()
     if confirm != 'y':
         print("[MESSAGE] : Sharing canceled.")
         return
+
     res = requests.post(f"{BASE_URL}/share", json={
         "token": token,
         "file_id": file_id,
@@ -219,19 +289,26 @@ def share_file():
     print_response(res)
 
 def unshare_file():
+    """
+    Cancel sharing a previously shared file with a particular user.
+    Only the file owner can unshare.
+    """
     owned = list_owned_files()
     if not owned:
         print("[MESSAGE] : You have no owned files.")
         return
+
     print("\n[Your Owned Files]")
     for f in owned:
         print(f"  ID: {f['id']} | NAME: {f['filename']}")
+
     file_id = input("Enter the file ID to unshare: ")
     target_username = input("Enter target username to unshare: ")
     confirm = input(f"Are you sure to unshare file ID '{file_id}' from '{target_username}'? (y/n): ").lower()
     if confirm != 'y':
         print("[MESSAGE] : Unsharing canceled.")
         return
+
     res = requests.post(f"{BASE_URL}/unshare", json={
         "token": token,
         "file_id": file_id,
@@ -240,18 +317,24 @@ def unshare_file():
     print_response(res)
 
 def delete_file():
+    """
+    Delete an owned file entirely. Only the file owner can do this.
+    """
     owned = list_owned_files()
     if not owned:
         print("[MESSAGE] : You have no owned files.")
         return
+
     print("\n[Your Owned Files]")
     for f in owned:
         print(f"  ID: {f['id']} | NAME: {f['filename']}")
+
     file_id = input("Enter the file ID to delete: ")
     confirm = input(f"Are you sure to delete file ID '{file_id}'? (y/n): ").lower()
     if confirm != 'y':
         print("[MESSAGE] : Deletion canceled.")
         return
+
     res = requests.delete(f"{BASE_URL}/delete", json={
         "token": token,
         "file_id": file_id
@@ -259,21 +342,28 @@ def delete_file():
     print_response(res)
 
 def show_file_info():
+    """
+    Display detailed file info: owner name, who it is shared with, etc.
+    """
     files = list_accessible_files()
     if not files:
         print("[MESSAGE] : You have no accessible files.")
         return
+
     print("\n[Your Accessible Files]")
     for f in files:
         print(f"  ID: {f['id']} | NAME: {f['filename']} | OWNER: {f['owner_name']} | RELATION: {f['relation']}")
+
     file_id = input("Enter the file ID to check info: ")
     params = {"token": token, "file_id": file_id}
     res = requests.get(f"{BASE_URL}/file_info", params=params)
+
     if res.status_code == 200:
         data = res.json()
         owner = data.get("owner")
         fname = data.get("filename")
         shared_list = data.get("shared_with", [])
+
         print(f"\n[MESSAGE] : File Info")
         print(f"  Filename : {fname}")
         print(f"  Owner    : {owner}")
@@ -287,6 +377,9 @@ def show_file_info():
         print_response(res)
 
 def view_logs():
+    """
+    View system logs (audit records), only accessible if the user is admin.
+    """
     global token, is_admin
     if not token:
         print("[ERROR] : Not logged in.")
@@ -294,6 +387,7 @@ def view_logs():
     if not is_admin:
         print("[ERROR] : You are not admin. Access denied.")
         return
+
     res = requests.get(f"{BASE_URL}/read_logs", params={"token": token})
     if res.status_code == 200:
         data = res.json()
@@ -308,6 +402,11 @@ def view_logs():
         print_response(res)
 
 def upload_file_in_chunks_single_route():
+    """
+    Single-route chunk-based file upload:
+      - If file_id=-1 => server will auto-create a new file (first chunk).
+      - If file_id>=0 => server updates the existing file chunk by chunk.
+    """
     if not token:
         print("[ERROR] You are not logged in.")
         return
@@ -316,7 +415,7 @@ def upload_file_in_chunks_single_route():
     if not os.path.exists(file_path):
         print("[ERROR] : File not found.")
         return
-    
+
     confirm = input(f"Are you sure to upload '{file_path}' in chunk mode? (y/n): ").lower()
     if confirm != 'y':
         print("[MESSAGE] : Upload canceled.")
@@ -346,13 +445,13 @@ def upload_file_in_chunks_single_route():
             enc_data = cipher.encrypt(chunk_data)
             b64_data = base64.b64encode(enc_data).decode()
 
-            # 第一次chunk => server若 file_id=-1, chunk_index=0 => create new
             post_data = {
                 "token": token,
                 "file_id": raw_file_id,
                 "chunk_index": chunk_idx,
                 "chunk_data": b64_data
             }
+            # For the very first chunk of a new file, send the filename
             if chunk_idx == 0 and raw_file_id < 0:
                 post_data["filename"] = filename
 
@@ -364,7 +463,7 @@ def upload_file_in_chunks_single_route():
                 j = r.json()
                 print("[MESSAGE]", j.get("message", ""))
 
-                # 若是第一次 chunk 而 file_id=-1 => server回傳 file_id => 後面更新 raw_file_id
+                # If server created a new file_id on chunk 0, update local raw_file_id
                 if chunk_idx == 0 and raw_file_id < 0:
                     new_fid = j.get("file_id")
                     if new_fid is not None:
@@ -376,17 +475,22 @@ def upload_file_in_chunks_single_route():
     print("[MESSAGE] All chunks uploaded via single-route approach.")
 
 def download_file_in_chunks():
+    """
+    Download a file in chunk-based mode, merge all chunks locally.
+    """
     if not token:
         print("[ERROR] You are not logged in.")
         return
-    
+
+    # List accessible files to help user pick file_id
     all_files = list_accessible_files()
     if not all_files:
         print("[MESSAGE] : No files to download.")
         return
-    
+
     file_id = input("Enter the file_id to download: ")
 
+    # Attempt to guess a default local filename
     default_name = "output.txt"
     for f in all_files:
         if str(f["id"]) == file_id:
@@ -402,6 +506,7 @@ def download_file_in_chunks():
         print("[MESSAGE] : Download canceled.")
         return
 
+    # Get all chunks
     res = requests.get(f"{BASE_URL}/download_chunks", params={
         "token": token,
         "file_id": file_id
@@ -416,6 +521,7 @@ def download_file_in_chunks():
     key = load_key()
     cipher = Fernet(key)
 
+    # Sort by chunk_index and decrypt
     sorted_chunks = sorted(chunks, key=lambda x: x["chunk_index"])
     with open(out_path,"wb") as out:
         for c in sorted_chunks:
@@ -426,11 +532,16 @@ def download_file_in_chunks():
     print("[MESSAGE] Downloaded and merged all chunks into", out_path)
 
 def auto_update_file_in_chunks():
+    """
+    Automatically compare the old file (downloaded from server in chunks) 
+    with a new local file, then only update the changed chunks.
+    Also remove extra chunks if the new file is shorter.
+    """
     global token
     if not token:
         print("[ERROR] You are not logged in.")
         return
-    
+
     all_files = list_accessible_files()
     if not all_files:
         print("[MESSAGE] : You have no accessible files to update.")
@@ -441,13 +552,13 @@ def auto_update_file_in_chunks():
     if not os.path.exists(new_file_path):
         print("[ERROR] New file not found.")
         return
-    
+
     confirm = input(f"Are you sure to update file_id={file_id} with new file '{new_file_path}'? (y/n): ").lower()
     if confirm != 'y':
         print("[MESSAGE] : Update canceled.")
         return
 
-    # 1) 下載舊檔案 chunks
+    # 1) Download old file's chunks -> decrypt and merge
     res = requests.get(f"{BASE_URL}/download_chunks", params={
         "token": token,
         "file_id": file_id
@@ -462,7 +573,7 @@ def auto_update_file_in_chunks():
     key = load_key()
     cipher = Fernet(key)
 
-    # 組合舊檔案 plaintext
+    # Merge old plaintext
     sorted_chunks = sorted(chunk_list, key=lambda c: c["chunk_index"])
     old_plain_bytes = b""
     for c in sorted_chunks:
@@ -470,7 +581,7 @@ def auto_update_file_in_chunks():
         dec_bytes = cipher.decrypt(enc_bytes)
         old_plain_bytes += dec_bytes
 
-    # 2) 讀取新檔案
+    # 2) Read new local file
     with open(new_file_path, "rb") as nf:
         new_plain_bytes = nf.read()
 
@@ -482,12 +593,12 @@ def auto_update_file_in_chunks():
     offset = 0
     chunk_index = 0
 
+    # Compare each chunk and only upload differences
     while offset < max_length:
         old_chunk = old_plain_bytes[offset:offset+chunk_size]
         new_chunk = new_plain_bytes[offset:offset+chunk_size]
 
         if old_chunk != new_chunk:
-            # 上傳新的 chunk
             enc = cipher.encrypt(new_chunk)
             b64_data = base64.b64encode(enc).decode()
             rr = requests.post(f"{BASE_URL}/upload_chunk", json={
@@ -505,17 +616,13 @@ def auto_update_file_in_chunks():
         chunk_index += 1
         offset += chunk_size
 
-    # ====== 新增刪除多餘 chunk ======
-    # 如果舊檔案比較長 => old_total_chunks = ceil(old_length / chunk_size)
-    #                     new_total_chunks = ceil(new_length / chunk_size)
-    # 例如 old=35000 bytes => 5 chunks, new=25000 => 4 chunks => 刪 chunk_index=4
-    import math
+    # Remove extra chunk(s) if old was longer
     old_total_chunks = math.ceil(old_length / chunk_size)
     new_total_chunks = math.ceil(new_length / chunk_size)
 
     if old_total_chunks > new_total_chunks:
         print(f"[INFO] old_total_chunks={old_total_chunks} > new_total_chunks={new_total_chunks}")
-        # 刪除 new_total_chunks ~ old_total_chunks-1
+        # Delete from new_total_chunks up to old_total_chunks-1
         for cindex in range(new_total_chunks, old_total_chunks):
             delr = requests.delete(f"{BASE_URL}/delete_chunk", json={
                 "token": token,
@@ -533,6 +640,10 @@ def auto_update_file_in_chunks():
     print("[MESSAGE] auto_update_file_in_chunks completed. Only changed chunks re-uploaded. Extra chunks removed if needed.")
 
 def file_menu():
+    """
+    Sub-menu for file operations. 
+    Provides both single-block (upload/download) and extended chunk-based approaches.
+    """
     while True:
         print("\n[File Menu]")
         print("1. Upload File (Single)")
@@ -551,9 +662,9 @@ def file_menu():
         choice = input("Choose an option: ")
 
         if choice == "1":
-            upload_file()            # 你原先的單檔上傳
+            upload_file()
         elif choice == "2":
-            download_file()          # 你原先的單檔下載
+            download_file()
         elif choice == "3":
             share_file()
         elif choice == "4":
@@ -578,30 +689,28 @@ def file_menu():
                     print(f"  ID: {f['id']} | NAME: {f['filename']} | OWNER: {f['owner_name']} | RELATION: {f['relation']}")
         elif choice == "8":
             show_file_info()
-
-        # 下面是新的分塊式操作 (Extended)
         elif choice == "9":
-            # 分塊上傳
             upload_file_in_chunks_single_route()
         elif choice == "10":
-            # 分塊下載
             download_file_in_chunks()
         elif choice == "11":
-            # 只更新單一區塊
             auto_update_file_in_chunks()
-
         elif choice == "12":
             break
-
         else:
             print("[ERROR] : Invalid selection.")
 
 def main():
+    """
+    The main entry point of the client.
+    Provides a top-level menu for Register/Login/Exit or for file operations if logged in.
+    """
     print("[MESSAGE] : Welcome to the Secure Storage System with Log Auditing!")
     init_key()
 
     global token, is_admin, current_username
     while True:
+        # If user has a token, we consider them logged in, show the "logged in" menu
         if token:
             print("\n[Main Menu - Logged In]")
             print("1. Access Files")
@@ -624,6 +733,7 @@ def main():
                 else:
                     print("[ERROR] : Invalid selection.")
             else:
+                # Non-admin user
                 print("3. Logout")
                 print("4. Exit")
                 choice = input("Choose an option: ")
@@ -638,6 +748,7 @@ def main():
                 else:
                     print("[ERROR] : Invalid selection.")
         else:
+            # Not logged in
             print("\n[Main Menu - Not Logged In]")
             print("1. Register (normal user)")
             print("2. Register (admin) [Just a demonstration!]")

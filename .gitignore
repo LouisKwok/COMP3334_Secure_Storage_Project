@@ -1,21 +1,21 @@
-# Python 虛擬環境
+# Python Virtual Environment
 venv/
 .venv/
 
-# Python 編譯或暫存檔
+# Python compiled or runtime files
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 
-# 作業系統雜項
+# Operating System Miscellaneous
 .DS_Store
 Thumbs.db
 
-# 環境變數、敏感資訊檔
+# Environment variables, sensitive information files
 .env
 secret.key
 
-# IDE 設定
+# IDE settings
 .vscode/
 .idea/

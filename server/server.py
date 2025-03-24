@@ -3,25 +3,36 @@ import os
 import base64
 import re
 
+# Import all necessary functions from database.py
+# e.g., create_tables, create_user, verify_user, ...
 from server.database import (
     create_tables, create_user, verify_user, update_password, is_admin_user,
     get_user_id, get_username_by_id, upload_file_db, get_user_files, get_file_by_id,
     delete_file_db, share_file_db, unshare_file_db, has_access, get_shared_users,
-    get_accessible_files, log_event, read_all_logs, get_otp_secret, upsert_chunk, get_chunks, remove_chunk, create_file_in_db
+    get_accessible_files, log_event, read_all_logs, get_otp_secret, upsert_chunk,
+    get_chunks, remove_chunk, create_file_in_db
 )
 
 app = Flask(__name__)
+
+# A dictionary {token: username} to track logged-in sessions.
 logged_in_users = {}
 
 @app.route('/register', methods=['POST'])
 def register():
+    """
+    Register a normal user (not admin).
+    Requires username/password in JSON.
+    Also generates an OTP secret for MFA.
+    """
     data = request.json
     username = data.get("username")
     password = data.get("password")
-    
+
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
     
+    # Validate username format (optional to prevent suspicious characters).
     if not validate_username(username):
         return jsonify({"error": "Invalid username format"}), 400
 
@@ -36,12 +47,16 @@ def register():
         print(f"[WARN] Registration failed. User '{username}' already exists.")
         return jsonify({"error": "Username already exists"}), 400
 
-
 @app.route('/admin_register', methods=['POST'])
 def admin_register():
+    """
+    Special route to register an admin user (for demonstration).
+    Similar to '/register', but sets is_admin=True.
+    """
     data = request.json
     username = data.get("username")
     password = data.get("password")
+
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
@@ -57,13 +72,18 @@ def admin_register():
 
 @app.route('/login', methods=['POST'])
 def login():
+    """
+    Log in with username, password, and OTP code for MFA.
+    If everything is correct, return a new session token and admin flag.
+    """
     data = request.json
     username = data.get("username")
     password = data.get("password")
     otp_code = data.get("otp_code")
 
+    # First verify username/password
     if verify_user(username, password):
-        # 檢查 OTP
+        # Next check OTP
         secret = get_otp_secret(username)
         if secret is None:
             return jsonify({"error": "User has no OTP secret"}), 400
@@ -73,18 +93,19 @@ def login():
         if not otp_code:
             return jsonify({"error": "OTP code is required"}), 400
 
-        # 驗證 OTP 是否正確
+        # Validate OTP
         if not totp.verify(otp_code):
             print(f"[WARN] OTP verification failed for user '{username}'.")
             return jsonify({"error": "Invalid OTP code"}), 401
 
-        # OTP ok 才算登入成功
+        # Generate a random session token
         token = os.urandom(16).hex()
         logged_in_users[token] = username
 
         user_id = get_user_id(username)
         log_event(user_id, "LOGIN", detail=f"token={token}")
         print(f"[INFO] User '{username}' logged in with OTP. Token: {token}")
+
         is_admin = is_admin_user(username)
         return jsonify({
             "message": "Login successful",
@@ -97,6 +118,9 @@ def login():
 
 @app.route('/logout', methods=['POST'])
 def logout():
+    """
+    Log out by invalidating the token from logged_in_users dict.
+    """
     data = request.json
     token = data.get("token")
     if token and token in logged_in_users:
@@ -106,24 +130,32 @@ def logout():
         del logged_in_users[token]
         print(f"[INFO] User '{user}' logged out. Token invalidated.")
         return jsonify({"message": "Logout successful"})
+
     print(f"[WARN] Invalid logout attempt with token: {token}")
     return jsonify({"error": "Invalid token"}), 401
 
 @app.route('/reset_password', methods=['POST'])
 def reset_password():
+    """
+    Reset the current user's password.
+    Requires old_password, new_password, and a valid token.
+    """
     data = request.json
     token = data.get("token")
     old_password = data.get("old_password")
     new_password = data.get("new_password")
+
     if token not in logged_in_users:
         print("[WARN] Password reset attempt without valid token.")
         return jsonify({"error": "Not logged in"}), 401
 
     username = logged_in_users[token]
+    # Verify the old password is correct
     if not verify_user(username, old_password):
         print(f"[WARN] Incorrect old password for user '{username}'.")
         return jsonify({"error": "Old password is incorrect"}), 400
 
+    # Update to the new password
     if update_password(username, new_password):
         user_id = get_user_id(username)
         log_event(user_id, "RESET_PASSWORD", detail="Password updated")
@@ -135,6 +167,10 @@ def reset_password():
 
 @app.route('/upload', methods=['POST'])
 def upload():
+    """
+    Single-block file upload (non-chunk).
+    Requires 'filename' and 'file_data' in base64, plus a valid token.
+    """
     data = request.json
     token = data.get("token")
     filename = data.get("filename")
@@ -146,7 +182,7 @@ def upload():
     if not filename or not file_data:
         return jsonify({"error": "Filename and file_data are required"}), 400
 
-    # 檔名驗證：防止 "../" 或不允許字元
+    # Validate filename to avoid path traversal or weird chars
     if not validate_filename(filename):
         return jsonify({"error": "Invalid filename"}), 400
 
@@ -162,34 +198,46 @@ def upload():
     return jsonify({"message": f"File '{filename}' uploaded successfully"})
 
 def validate_username(username):
+    """
+    Optional function to reject suspicious or overly complicated usernames.
+    This pattern allows 3-20 characters, only letters, digits, underscore, or dash.
+    """
     pattern = r'^[a-zA-Z0-9_-]{3,20}$'
     return bool(re.match(pattern, username))
 
 @app.route('/list_files', methods=['GET'])
 def list_files():
+    """
+    Lists all files owned by the current user (simple listing).
+    """
     token = request.args.get("token")
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
 
     username = logged_in_users[token]
     user_id = get_user_id(username)
+
     files = get_user_files(user_id)
     file_list = [{"id": f[0], "filename": f[1]} for f in files]
     return jsonify({"files": file_list})
 
 @app.route('/list_my_accessible_files', methods=['GET'])
 def list_my_accessible_files():
+    """
+    Lists all files the user can access (either owned or shared).
+    """
     token = request.args.get("token")
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
 
     username = logged_in_users[token]
     user_id = get_user_id(username)
+
     files = get_accessible_files(user_id)
     file_list = []
     for f in files:
         file_list.append({
-            "id": f["id"], 
+            "id": f["id"],
             "filename": f["filename"],
             "owner_name": f["owner_name"],
             "relation": f["relation"]
@@ -198,8 +246,13 @@ def list_my_accessible_files():
 
 @app.route('/download', methods=['GET'])
 def download():
+    """
+    Single-block file download (non-chunk).
+    User must have access to the file. Returns base64 of the entire encrypted file data.
+    """
     token = request.args.get("token")
     file_id = request.args.get("file_id")
+
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
     if not file_id:
@@ -207,6 +260,7 @@ def download():
 
     username = logged_in_users[token]
     user_id = get_user_id(username)
+
     if not has_access(user_id, file_id):
         print(f"[WARN] User '{username}' tried to download file '{file_id}' without permission.")
         return jsonify({"error": "Access denied"}), 403
@@ -226,14 +280,19 @@ def download():
 
 @app.route('/delete', methods=['DELETE'])
 def delete_file():
+    """
+    Delete an owned file. Also removes share relationships for that file.
+    """
     data = request.json
     token = data.get("token")
     file_id = data.get("file_id")
+
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
 
     username = logged_in_users[token]
     user_id = get_user_id(username)
+
     deleted = delete_file_db(file_id, user_id)
     if deleted:
         log_event(user_id, "DELETE", detail=f"file_id={file_id}")
@@ -245,15 +304,21 @@ def delete_file():
 
 @app.route('/share', methods=['POST'])
 def share():
+    """
+    Share an owned file with another user. 
+    The 'target_username' must exist, otherwise 404 error.
+    """
     data = request.json
     token = data.get("token")
     file_id = data.get("file_id")
     target_username = data.get("target_username")
+
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
 
     username = logged_in_users[token]
     user_id = get_user_id(username)
+
     file_record = get_file_by_id(file_id)
     if not file_record:
         return jsonify({"error": "File not found"}), 404
@@ -273,15 +338,21 @@ def share():
 
 @app.route('/unshare', methods=['POST'])
 def unshare():
+    """
+    Remove sharing from a previously shared file.
+    Only the owner can unshare. 
+    """
     data = request.json
     token = data.get("token")
     file_id = data.get("file_id")
     target_username = data.get("target_username")
+
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
 
     username = logged_in_users[token]
     user_id = get_user_id(username)
+
     file_record = get_file_by_id(file_id)
     if not file_record:
         return jsonify({"error": "File not found"}), 404
@@ -302,8 +373,13 @@ def unshare():
 
 @app.route('/file_info', methods=['GET'])
 def file_info():
+    """
+    Display file details (owner and which users it is shared with),
+    as long as the current user has access.
+    """
     token = request.args.get("token")
     file_id = request.args.get("file_id")
+
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
     if not file_id:
@@ -334,6 +410,9 @@ def file_info():
 
 @app.route('/read_logs', methods=['GET'])
 def read_logs():
+    """
+    View the audit logs. Only allowed for admin users.
+    """
     token = request.args.get("token")
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
@@ -346,27 +425,35 @@ def read_logs():
     return jsonify({"logs": logs})
 
 def validate_filename(filename):
+    """
+    Validate file name to prevent path traversal ('../'), backslash, or illegal chars.
+    Also ensures the filename is not empty after stripping.
+    """
     if "../" in filename or "..\\" in filename:
         return False
+
     pattern = r'^[a-zA-Z0-9._-]+$'
     if not re.match(pattern, filename):
         return False
+
     if not filename.strip():
         return False
+
     return True
 
 @app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
     """
-    單一路由: 若 file_id=-1/None 且 chunk_index=0 => 自動建立檔案並回傳 file_id。
-    若 file_id>0 => 上傳更新既有檔案的 chunk。
+    Single-route chunk-based upload:
+      - If file_id = -1 or None and chunk_index=0 => create a new file record, return the new file_id.
+      - If file_id >= 0 => upsert the chunk for an existing file (must have access).
     """
     data = request.json
     token = data.get("token")
     raw_file_id = data.get("file_id", None)
     chunk_index = data.get("chunk_index")
     chunk_data_b64 = data.get("chunk_data")
-    filename = data.get("filename")  # 只有第一次 chunk 需要
+    filename = data.get("filename")  # Only needed for the very first chunk of a new file
 
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
@@ -374,7 +461,7 @@ def upload_chunk():
     if chunk_index is None or chunk_data_b64 is None:
         return jsonify({"error": "chunk_index, chunk_data are required"}), 400
 
-    # chunk_index 檢查
+    # Validate chunk_index
     try:
         chunk_index = int(chunk_index)
         if chunk_index < 0:
@@ -382,35 +469,37 @@ def upload_chunk():
     except ValueError:
         return jsonify({"error": "chunk_index must be integer"}), 400
 
-    # base64 decode
+    # Decode base64 chunk data
     try:
         encrypted_data = base64.b64decode(chunk_data_b64)
     except Exception:
         return jsonify({"error": "Invalid base64 chunk_data"}), 400
 
+    # Optional size limit for each chunk
     max_chunk_size = 10 * 1024 * 1024
     if len(encrypted_data) > max_chunk_size:
         return jsonify({"error": "Chunk too large"}), 413
 
+    # Find current user
     current_user = logged_in_users[token]
     user_id = get_user_id(current_user)
     if not user_id:
         return jsonify({"error": "User record not found"}), 404
 
-    # file_id 檢查
+    # Determine if we're creating a new file or updating existing
     if raw_file_id is None or raw_file_id in [-1, 0]:
-        # 表示要新建檔案 => 必須 chunk_index=0, 且要有filename
+        # Must be chunk_index=0 for the first chunk of a new file
         if chunk_index != 0:
             return jsonify({"error": "To create a new file, chunk_index must be 0"}), 400
         if not filename:
             return jsonify({"error": "filename is required for the first chunk of a new file"}), 400
 
-        # create file row
+        # Create new file record
         new_file_id = create_file_in_db(user_id, filename)
         real_file_id = new_file_id
         print(f"[INFO] Created new file with id={real_file_id} for user_id={user_id}")
     else:
-        # 使用現有檔案
+        # Use existing file
         try:
             real_file_id = int(raw_file_id)
         except ValueError:
@@ -419,13 +508,14 @@ def upload_chunk():
         frow = get_file_by_id(real_file_id)
         if not frow:
             return jsonify({"error": f"File with id={real_file_id} not found"}), 404
+
         if not has_access(user_id, real_file_id):
             return jsonify({"error": "Access denied"}), 403
 
-    # upsert chunk
+    # Insert/update the chunk
     upsert_chunk(real_file_id, chunk_index, encrypted_data)
 
-    # log
+    # Log the chunk upload
     log_event(user_id, "UPLOAD_CHUNK", detail=f"file_id={real_file_id}, chunk_index={chunk_index}")
 
     return jsonify({
@@ -435,6 +525,10 @@ def upload_chunk():
 
 @app.route('/download_chunks', methods=['GET'])
 def download_chunks():
+    """
+    Download all chunks for a given file_id. The user must have access.
+    Returns a list of {chunk_index, chunk_data} in base64.
+    """
     token = request.args.get("token")
     file_id = request.args.get("file_id")
 
@@ -443,6 +537,7 @@ def download_chunks():
     if not file_id:
         return jsonify({"error": "file_id is required"}), 400
 
+    # Convert file_id to integer
     try:
         file_id = int(file_id)
     except ValueError:
@@ -464,11 +559,14 @@ def download_chunks():
         result.append({"chunk_index": cidx, "chunk_data": b64_enc})
 
     log_event(user_id, "DOWNLOAD_CHUNKS", detail=f"file_id={file_id}")
-
     return jsonify({"chunks": result})
 
 @app.route('/delete_chunk', methods=['DELETE'])
 def delete_chunk_endpoint():
+    """
+    Delete a specific chunk from an existing file (partial chunk removal).
+    Used in auto-update scenario if the new file is shorter.
+    """
     data = request.json
     token = data.get("token")
     file_id = data.get("file_id")
@@ -476,11 +574,9 @@ def delete_chunk_endpoint():
 
     if token not in logged_in_users:
         return jsonify({"error": "Not logged in"}), 401
-
     if file_id is None or chunk_index is None:
         return jsonify({"error": "file_id and chunk_index are required"}), 400
 
-    # 檢查型別
     try:
         file_id = int(file_id)
         chunk_index = int(chunk_index)
@@ -496,7 +592,7 @@ def delete_chunk_endpoint():
     if not has_access(user_id, file_id):
         return jsonify({"error": "Access denied"}), 403
 
-    # 執行資料庫刪除
+    # Perform the deletion in DB
     rowcount = remove_chunk(file_id, chunk_index)
     if rowcount > 0:
         log_event(user_id, "DELETE_CHUNK", detail=f"file_id={file_id}, chunk_index={chunk_index}")
@@ -505,6 +601,7 @@ def delete_chunk_endpoint():
         return jsonify({"error": "No such chunk or already deleted"}), 404
 
 if __name__ == '__main__':
+    # If we run server.py directly, create tables and start the Flask server
     create_tables()
     print("[INFO] Database initialized.")
     app.run(host='0.0.0.0', port=5000, debug=True)
